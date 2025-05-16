@@ -1,0 +1,140 @@
+import os
+import requests
+import json
+
+# HubSpot setup
+HUBSPOT_ACCESS_TOKEN = os.getenv("workflow_key")
+HEADERS = {
+    "Authorization": f"Bearer {HUBSPOT_ACCESS_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Configuration
+DEAL_PROPERTY = "multi_deal_prop"
+COMPANY_PROP_1 = "company_multi_prop_1"
+COMPANY_PROP_2 = "company_multi_prop_2"
+
+# Define mapping from deal option values to company property values
+# Map the deal values to the correct company property internal values
+MAPPINGS = {
+    # Deal values -> company_multi_prop_1 values
+    "1": {"property": COMPANY_PROP_1, "value": "1"},  # Map deal "1" to company prop 1 value "1"
+    "2": {"property": COMPANY_PROP_1, "value": "2"},  # Map deal "2" to company prop 1 value "2"
+    "3": {"property": COMPANY_PROP_1, "value": "3"},  # Map deal "3" to company prop 1 value "3" 
+    "4": {"property": COMPANY_PROP_1, "value": "4"},  # Map deal "4" to company prop 1 value "4"
+    
+    # Deal values -> company_multi_prop_2 values
+    "5": {"property": COMPANY_PROP_2, "value": "1"},  # Map deal "5" to company prop 2 value "1"
+    "6": {"property": COMPANY_PROP_2, "value": "2"},  # Map deal "6" to company prop 2 value "2"
+    "7": {"property": COMPANY_PROP_2, "value": "3"},  # Map deal "7" to company prop 2 value "3"
+    "8": {"property": COMPANY_PROP_2, "value": "4"},  # Map deal "8" to company prop 2 value "4"
+}
+
+def get_deal_properties(deal_id):
+    """Get the deal properties we need"""
+    url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}?properties={DEAL_PROPERTY}"
+    
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code != 200:
+        print(f"Error fetching deal: {response.status_code} - {response.text}")
+        return None
+    
+    return response.json()["properties"]
+
+def get_associated_companies(deal_id):
+    """Get companies associated with this deal"""
+    url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/companies"
+    
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code != 200:
+        print(f"Error fetching associations: {response.status_code} - {response.text}")
+        return []
+    
+    results = response.json().get("results", [])
+    return [result["id"] for result in results]
+
+def update_company_properties(company_id, selected_values):
+    """Update the company properties with the mapped values"""
+    url = f"https://api.hubapi.com/crm/v3/objects/companies/{company_id}"
+    
+    # Group values by target property
+    property_values = {}
+    for deal_value in selected_values:
+        if deal_value in MAPPINGS:
+            mapping = MAPPINGS[deal_value]
+            target_property = mapping["property"]
+            company_value = mapping["value"]
+            
+            if target_property not in property_values:
+                property_values[target_property] = []
+            
+            property_values[target_property].append(company_value)
+    
+    # Format properties for update
+    properties = {}
+    for prop, values in property_values.items():
+        properties[prop] = ";".join(values)
+    
+    if not properties:
+        print("No valid property mappings found")
+        return True  # Nothing to update
+    
+    data = {
+        "properties": properties
+    }
+    
+    print(f"Updating company {company_id} with properties: {json.dumps(properties)}")
+    
+    response = requests.patch(url, headers=HEADERS, json=data)
+    
+    if response.status_code == 200:
+        print(f"Updated company {company_id} with mapped properties.")
+        return True
+    else:
+        print(f"Error updating company {company_id}: {response.status_code} - {response.text}")
+        return False
+
+def main(event):
+    # Get the deal ID from the current workflow execution
+    deal_id = event["inputFields"]["hs_object_id"]
+    print(f"Starting property mapping for deal {deal_id}")
+    
+    # Get the deal properties
+    deal_properties = get_deal_properties(deal_id)
+    if not deal_properties:
+        print("Could not fetch deal properties.")
+        return {"outputFields": {"mapping_success": False}}
+    
+    # Get the multi-select property value
+    deal_property_value = deal_properties.get(DEAL_PROPERTY)
+    if not deal_property_value:
+        print(f"Deal does not have the {DEAL_PROPERTY} property set.")
+        return {"outputFields": {"mapping_success": False}}
+    
+    # Handle multi-select values (semicolon separated)
+    selected_values = deal_property_value.split(";")
+    print(f"Found selected values: {selected_values}")
+    
+    # Get associated companies
+    company_ids = get_associated_companies(deal_id)
+    if not company_ids:
+        print("No companies associated with this deal.")
+        return {"outputFields": {"mapping_success": False}}
+    
+    print(f"Found {len(company_ids)} associated companies.")
+    
+    # Update each associated company
+    success_count = 0
+    for company_id in company_ids:
+        if update_company_properties(company_id, selected_values):
+            success_count += 1
+    
+    success = success_count > 0
+    print(f"Mapping complete. Successfully updated {success_count} of {len(company_ids)} companies.")
+    
+    return {
+        "outputFields": {
+            "mapping_success": success,
+            "companies_updated": success_count
+        }
+    }
